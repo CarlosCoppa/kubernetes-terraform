@@ -1,0 +1,160 @@
+#cloud-config
+package_upgrade: true
+
+package_update: true
+
+runcmd:
+  - sudo swapoff -a #Deshabilitar el swapping memory
+  - sudo mkdir /home/ubuntu/manifests
+  - sudo mkdir /home/ubuntu/keys
+  - sudo mkdir -p /etc/containerd
+  - containerd config default | sudo tee /etc/containerd/config.toml
+  - |
+    cat <<EOF | sudo tee /etc/modules-load.d/containerd.conf
+    overlay
+    br_netfilter
+    EOF
+  - sudo modprobe overlay
+  - sudo modprobe br_netfilter
+  - |
+    cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-cri.conf
+    net.bridge.bridge-nf-call-iptables  = 1
+    net.ipv4.ip_forward                 = 1
+    net.bridge.bridge-nf-call-ip6tables = 1
+    EOF
+  - sudo sysctl --system
+  # Instalación de kubeadm, kubelet y kubectl
+  - sudo apt-get update
+  - sudo apt-get install -y apt-transport-https ca-certificates curl
+  - sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
+  - echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+  - sudo apt-get update
+  - sudo apt-get install -y kubelet=1.22.0-00 kubeadm=1.22.0-00 kubectl=1.22.0-00
+  - sudo apt-mark hold kubelet kubeadm kubectl
+  # Instalación de kubeadm en el nodo master
+  - sudo kubeadm init --ignore-preflight-errors=Mem #Instalación de kubeadm ignorando los requerimientos de memoria
+  # Copiar el directorio de kubeconfig en una carpeta del directorio raíz
+  - sudo mkdir -p /home/ubuntu/.kube
+  - sudo cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+  - sudo chown ubuntu:ubuntu /home/ubuntu/.kube/config #$(id -u):$(id -g)
+  # Instalar el plugin de CNI para la implementación del Pod Networking
+  - sudo kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')" --kubeconfig /etc/kubernetes/admin.conf
+  # Instalar HELM
+  # - sudo curl https://baltocdn.com/helm/signing.asc | sudo apt-key add -
+  # - sudo apt-get install apt-transport-https --yes
+  # - echo "deb https://baltocdn.com/helm/stable/debian/ all main" | sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
+  # - sudo apt-get update
+  # - sudo apt-get install helm
+  # - sudo helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+  # - sudo helm repo update
+  # - sudo helm install ingress-nginx ingress-nginx/ingress-nginx --kubeconfig /etc/kubernetes/admin.conf
+  - openssl genrsa -out /home/ubuntu/keys/dev-tom.key 2048
+  - openssl req -new -key /home/ubuntu/keys/dev-tom.key -subj "/CN=tom" -out /home/ubuntu/keys/dev-tom.csr
+packages:
+  - containerd
+write_files:
+  - path: /home/ubuntu/manifests/nginx-deployment.yaml
+    content: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: nginx-deployment
+        labels:
+          app: nginx
+      spec:
+        replicas: 2
+        selector:
+          matchLabels:
+            app: nginx
+        template:
+          metadata:
+            labels:
+              app: nginx
+          spec:
+            containers:
+              - name: nginx
+                image: nginx
+                ports:
+                  - containerPort: 80
+    defer: false
+  - path: /home/ubuntu/manifests/nginx-service.yaml
+    content: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: nginx-service
+      spec:
+        type: LoadBalancer
+        selector:
+          app: nginx
+        ports:
+          - protocol: TCP
+            port: 8080
+            targetPort: 80
+            nodePort: 30000
+    defer: false
+  - path: /home/ubuntu/manifests/my-app-ingress.yaml
+    content: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        creationTimestamp: null
+        name: my-app-ingress
+      spec:
+        rules:
+        - host: ingress-nginx-758254601.us-east-1.elb.amazonaws.com
+          http:
+            paths:
+            - backend:
+                service:
+                  name: nginx-service
+                  port:
+                    number: 8080
+              path: /
+              pathType: Exact
+    defer: false
+  - path: /home/ubuntu/manifests/dev-tom-csr.yaml
+    content: |
+      apiVersion: certificates.k8s.io/v1
+      kind: CertificateSigningRequest
+      metadata:
+        name: myuser
+      spec:
+        request: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURSBSRVFVRVNULS0tLS0KTUlJQ1ZqQ0NBVDRDQVFBd0VURVBNQTBHQTFVRUF3d0dZVzVuWld4aE1JSUJJakFOQmdrcWhraUc5dzBCQVFFRgpBQU9DQVE4QU1JSUJDZ0tDQVFFQTByczhJTHRHdTYxakx2dHhWTTJSVlRWMDNHWlJTWWw0dWluVWo4RElaWjBOCnR2MUZtRVFSd3VoaUZsOFEzcWl0Qm0wMUFSMkNJVXBGd2ZzSjZ4MXF3ckJzVkhZbGlBNVhwRVpZM3ExcGswSDQKM3Z3aGJlK1o2MVNrVHF5SVBYUUwrTWM5T1Nsbm0xb0R2N0NtSkZNMUlMRVI3QTVGZnZKOEdFRjJ6dHBoaUlFMwpub1dtdHNZb3JuT2wzc2lHQ2ZGZzR4Zmd4eW8ybmlneFNVekl1bXNnVm9PM2ttT0x1RVF6cXpkakJ3TFJXbWlECklmMXBMWnoyalVnald4UkhCM1gyWnVVV1d1T09PZnpXM01LaE8ybHEvZi9DdS8wYk83c0x0MCt3U2ZMSU91TFcKcW90blZtRmxMMytqTy82WDNDKzBERHk5aUtwbXJjVDBnWGZLemE1dHJRSURBUUFCb0FBd0RRWUpLb1pJaHZjTgpBUUVMQlFBRGdnRUJBR05WdmVIOGR4ZzNvK21VeVRkbmFjVmQ1N24zSkExdnZEU1JWREkyQTZ1eXN3ZFp1L1BVCkkwZXpZWFV0RVNnSk1IRmQycVVNMjNuNVJsSXJ3R0xuUXFISUh5VStWWHhsdnZsRnpNOVpEWllSTmU3QlJvYXgKQVlEdUI5STZXT3FYbkFvczFqRmxNUG5NbFpqdU5kSGxpT1BjTU1oNndLaTZzZFhpVStHYTJ2RUVLY01jSVUyRgpvU2djUWdMYTk0aEpacGk3ZnNMdm1OQUxoT045UHdNMGM1dVJVejV4T0dGMUtCbWRSeEgvbUNOS2JKYjFRQm1HCkkwYitEUEdaTktXTU0xMzhIQXdoV0tkNjVoVHdYOWl4V3ZHMkh4TG1WQzg0L1BHT0tWQW9FNkpsYWFHdTlQVmkKdjlOSjVaZlZrcXdCd0hKbzZXdk9xVlA3SVFjZmg3d0drWm89Ci0tLS0tRU5EIENFUlRJRklDQVRFIFJFUVVFU1QtLS0tLQo=
+        signerName: kubernetes.io/kube-apiserver-client
+        expirationSeconds: 864000  # one day
+        usages:
+        - client auth
+    defer: false
+  - path: /home/ubuntu/manifests/dev-tom.conf
+    content: |
+      apiVersion: v1
+      clusters:
+      - cluster:
+          certificate-authority-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUMvakNDQWVhZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREFWTVJNd0VRWURWUVFERXdwcmRXSmwKY201bGRHVnpNQjRYRFRJeU1ERXhOREl3TlRFek9Gb1hEVE15TURFeE1qSXdOVEV6T0Zvd0ZURVRNQkVHQTFVRQpBeE1LYTNWaVpYSnVaWFJsY3pDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTGJmClRuWUxUM2FueFk3azFwUFlRaFNmd256V3BIQ3hYcUtqSUtvWHlBK2dwMmQxdEh5VEZCVlhDa0xXQTlSQUtYeXgKL3FaYTNBbHYzZkxxU3l2R2FsZUN0TXo0R0FFOGxtL0hvRkFMVml0cnFzazRFVlBYZ2ZLRHhoMTZXOEVaVHJhagpDQ0RtakFPWG9ISW54c2tOSFR1TUJDT3hYMVhua0tSbVBHWUZPajU3MlRsV1BoUkljNGVVaDlpY1Q1ZmRhQ09rCksyRzUvY1dpVFJzZHFDbUp4ZWhwTlN6aXBtQXBFNXBOck9ZblRPSmJGK2NFMWtJeXRCQkFwTUJlSmszdnVyNXEKeVpueVBKTTlFT1VoMC81eWJVRGhtS2krNE5OUDFDa0tzMnVqMVdmY1VLbGFrb1NTWjF6TUZIdmx2VmNsbDlwego5cmNFL01qOGQ2cVNGUVlGS0VVQ0F3RUFBYU5aTUZjd0RnWURWUjBQQVFIL0JBUURBZ0trTUE4R0ExVWRFd0VCCi93UUZNQU1CQWY4d0hRWURWUjBPQkJZRUZINmpxcVp3dDFlTld5Q2UyUHRkU0d0TnRISUZNQlVHQTFVZEVRUU8KTUF5Q0NtdDFZbVZ5Ym1WMFpYTXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBRWliV1N0cWFJa1FaQVR3TXlvQgpxM1ExbStiQnBDMUpNYjVTRml1REZ3dzJhNmxSOUtZeXhmSENKOVRMRlE3VzU5bjlNZGh0eldIYXF4YklEeC9TCnlDWitoZitnclVoUnFydFNOcS80UEZveFBvbjB4NHJ5elNpRHpZYmJOV0k3b3hYMTQ0LzdWUCtENGkzcUI3dkoKZFNrWWJScCtnazJLd3owYWxoNzhnYXN2WU9hcU5WbWhhb0p0QjBKdEVZbzJsZmowUTN6Z1FRWW9uTEQvMklTUApjdnM3bktzMDlIUjlTT25PeTRpS1dtNi9namRzRXhXOUdOYk5JQlpCV2UxRTNzOHVhajd0NXRpZVZVbjM0STd2CmZaN0IxM0VvNTRQTVpvNUttdVlla0RLYVJTVnk2eDJZZTk2MWVUUlFkTUtTZnpFQ0l3eXhzQmFVS0M0ZVk5Z1kKMUNRPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+          server: https://172.31.80.58:6443
+        name: kubernetes
+      contexts:
+      - context:
+          cluster: kubernetes
+          user: dev-tom
+        name: dev-tom@kubernetes
+      current-context: dev-tom@kubernetes
+      kind: Config
+      preferences: {}
+      users:
+      - name: dev-tom
+        user:
+          client-certificate-data: 
+          client-key-data:
+    defer: false
+  # - [
+  #     bash,
+  #     -c,
+  #     echo "this has been written via cloud-init" + $(date) >> /home/ubuntu/myScript.txt,
+  #   ]
+  # - |
+  #   cat <<EOF | sudo tee /etc/modules-load.d/containerd.conf
+  #   overlay
+  #   br_netfilter
+  #   EOF
