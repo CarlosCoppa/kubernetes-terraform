@@ -10,7 +10,7 @@ terraform {
     organization = "carlos-coppa"
 
     workspaces {
-      name = "kubernetes"
+      name = "kubernetes-terraform"
     }
   }
 }
